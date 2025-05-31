@@ -1,0 +1,22 @@
+# Byte-compiled / optimized / DLL files 
+__pycache__/ 
+*.py[cod] 
+*$py.class 
+ 
+# Distribution / packaging 
+.Python 
+env/ 
+venv/ 
+.venv/ 
+ 
+# GateCheck specific 
+gate_check.ini 
+*.log 
+logs/ 
+device_status.log 
+file_transfer.log 
+ 
+# Backup and temporary files 
+Backup/ 
+favicon.ico 
+*.bak 

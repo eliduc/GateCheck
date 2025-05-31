@@ -1,0 +1,24 @@
+[Device ID] 
+big_gate_ID = "your_tuya_device_id_here" 
+ip_gate = "192.168.x.x" 
+ 
+[Time-outs] 
+time_polling = 300 
+time_to_close = 60 
+close_tries = 3 
+delay_1 = 5 
+delay_2 = 15 
+delay_3 = 30 
+ 
+[Battery limits] 
+battery_limit_1 = 20 
+battery_limit_2 = 10 
+ 
+[tuya] 
+ACCESS_ID = "your_tuya_access_id" 
+ACCESS_KEY = "your_tuya_access_key" 
+API_REGION = "your_api_region" 
+ 
+[Telegram ID] 
+TOKEN = "your_telegram_bot_token" 
+chat_id = "your_chat_id" 

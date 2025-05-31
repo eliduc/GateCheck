@@ -1,0 +1,4 @@
+tinytuya
+requests
+python-telegram-bot
+configparser 
