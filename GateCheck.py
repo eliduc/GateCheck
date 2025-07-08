@@ -199,12 +199,25 @@ async def main():
                             else:
                                 logger.warning(f"Unexpected choice value: {choice_num}. Defaulting to regular polling interval.")
                                 await send_message_with_buttons("Unexpected selection, continuing normal operation", [], 0)
+                            
+                            # Принудительно останавливаем polling после завершения взаимодействия
+                            logger.info("Interaction completed, stopping telegram bot polling to save resources")
+                            try:
+                                await cleanup_bot()
+                            except Exception as e:
+                                logger.warning(f"Error during polling cleanup: {e}")
                                 
                         except Exception as e:
                             logger.error(f"Failed to send gate alert or process user choice: {e}")
                             logger.info("Defaulting to closing the gate")
                             await send_message_with_buttons("Error processing selection, closing gate by default", [], 0)
                             await close_gate_and_check(config)
+                            
+                            # Принудительно останавливаем polling после ошибки
+                            try:
+                                await cleanup_bot()
+                            except Exception as cleanup_e:
+                                logger.warning(f"Error during cleanup after exception: {cleanup_e}")
                 else:
                     logger.error(f"Unexpected result from check_gate: {result}")
                     logger.info(f"Waiting for {config['time_polling']} seconds before retrying")

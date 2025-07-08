@@ -66,10 +66,10 @@ async def _button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if not future.done():
             # Передаем данные кнопки (например, '1', '2') в Future
             future.set_result(query.data)
-        await query.edit_message_text(text=f"Спасибо! Ваш выбор получен.")
+        await query.edit_message_text(text=f"Thank you! Your choice has been received.")
     else:
         # Этот запрос мог истечь по таймауту или уже был обработан
-        await query.edit_message_text(text=f"Этот запрос более не активен.")
+        await query.edit_message_text(text=f"This query is no longer active")
 
 
 async def _initialize_bot_if_needed():
