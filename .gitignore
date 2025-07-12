@@ -11,6 +11,7 @@ venv/
  
 # GateCheck specific 
 gate_check.ini 
+online_check.ini
 *.log 
 logs/ 
 device_status.log 
