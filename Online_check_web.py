@@ -6,7 +6,7 @@ import json
 import time
 import re
 import requests
-import tinytuya
+from typing import Tuple, Optional
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -15,34 +15,171 @@ from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
 # Убедитесь, что эти файлы существуют и доступны для импорта
-from Check_Gate_State import check_gate
 from ControlSwitch import control_shelly_switch
 from TelegramButtonsGen import send_message_with_buttons, cleanup_bot
 
 # --- Конфигурация и Глобальные переменные ---
 INI_FILE = 'online_check.ini'
+
+# Настройка логирования без цветов в консоли
 logging.basicConfig(
-    filename='device_status.log',
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler('device_status.log'),
+        logging.StreamHandler()
+    ]
 )
+
+# Убираем цветные эмодзи из отладочных сообщений
+def simple_print(text):
+    """Простой вывод без эмодзи и цветов"""
+    print(text)
 
 # Глобальные переменные для хранения единого состояния приложения
 DEVICES = []
-TUYA_CONFIG = {}
+HA_CONFIG = {}
 GATE_IP = None
 last_gate_toggle = 0
 pending_updates = {}
+
+class HomeAssistantGateSensor:
+    """Класс для работы с датчиком ворот через Home Assistant API"""
+    
+    def __init__(self, ha_ip: str, ha_token: str, timeout: int = 10):
+        """
+        Инициализация подключения к Home Assistant
+        
+        Args:
+            ha_ip: IP адрес Home Assistant
+            ha_token: Long-lived access token
+            timeout: Таймаут запросов в секундах
+        """
+        self.ha_url = f"http://{ha_ip}:8123"
+        self.headers = {
+            "Authorization": f"Bearer {ha_token}",
+            "Content-Type": "application/json",
+        }
+        self.timeout = timeout
+    
+    def get_entity_state(self, entity_id: str) -> Optional[dict]:
+        """Получение состояния entity"""
+        try:
+            import time
+            timestamp = int(time.time() * 1000)
+            
+            headers_no_cache = self.headers.copy()
+            headers_no_cache.update({
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache',
+                'Expires': '0'
+            })
+            
+            response = requests.get(
+                f"{self.ha_url}/api/states/{entity_id}?_={timestamp}",
+                headers=headers_no_cache,
+                timeout=self.timeout
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logging.error(f"Ошибка получения данных с {entity_id}: HTTP {response.status_code}")
+                return None
+                
+        except Exception as e:
+            logging.error(f"Ошибка подключения для {entity_id}: {e}")
+            return None
+    
+    def get_gate_status(self, opening_entity_id: str) -> Tuple[Optional[bool], Optional[float]]:
+        """
+        Получение состояния датчика ворот
+        
+        Args:
+            opening_entity_id: Полный Entity ID датчика открытия
+            
+        Returns:
+            Tuple (gate_closed, battery_level):
+            - gate_closed: True если закрыто, False если открыто, None при ошибке
+            - battery_level: процент заряда батареи или None при ошибке
+        """
+        # Формируем entity ID батареи, заменяя "opening" на "battery" и "binary_sensor" на "sensor"
+        battery_entity_id = opening_entity_id.replace("_opening", "_battery").replace("binary_sensor.", "sensor.")
+        
+        # Получаем состояние датчика открытия
+        opening_data = self.get_entity_state(opening_entity_id)
+        gate_closed = None
+        
+        if opening_data:
+            state = opening_data.get('state', '').lower()
+            if state == 'on':
+                gate_closed = False  # Ворота открыты
+            elif state == 'off':
+                gate_closed = True   # Ворота закрыты
+            else:
+                logging.warning(f"Неожиданное состояние датчика {opening_entity_id}: '{state}'")
+        else:
+            logging.error(f"Не удалось получить состояние датчика {opening_entity_id}")
+        
+        # Получаем заряд батареи
+        battery_data = self.get_entity_state(battery_entity_id)
+        battery_level = None
+        
+        if battery_data:
+            try:
+                battery_level = float(battery_data.get('state', 0))
+            except (ValueError, TypeError):
+                logging.warning(f"Некорректное значение батареи для {battery_entity_id}: {battery_data.get('state')}")
+        else:
+            logging.error(f"Не удалось получить заряд батареи {battery_entity_id}")
+        
+        return gate_closed, battery_level
+
+def check_gate(gate_entity_id: str) -> Optional[Tuple[bool, float]]:
+    """
+    Функция для проверки состояния ворот через Home Assistant
+    
+    Args:
+        gate_entity_id: Entity ID датчика открытия ворот
+        
+    Returns:
+        Tuple (gate_closed, battery_level) или None при ошибке
+    """
+    global HA_CONFIG
+    
+    try:
+        # Исправляем чтение параметров - они приходят в нижнем регистре
+        ha_ip = HA_CONFIG.get('ha_ip', '').strip('"')
+        ha_token = HA_CONFIG.get('ha_token', '').strip('"')
+        
+        if not ha_ip or not ha_token:
+            logging.error(f"HA_IP или HA_TOKEN не настроены. ha_ip='{ha_ip}', ha_token существует: {bool(ha_token)}")
+            return None
+            
+        # Создаем экземпляр датчика
+        sensor = HomeAssistantGateSensor(ha_ip, ha_token)
+        
+        # Получаем состояние
+        gate_closed, battery_level = sensor.get_gate_status(gate_entity_id)
+        
+        if gate_closed is not None and battery_level is not None:
+            return gate_closed, battery_level
+        else:
+            return None
+            
+    except Exception as e:
+        logging.error(f"Ошибка в check_gate: {e}")
+        return None
 
 # --- Lifespan Manager для FastAPI ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Выполняется один раз при старте и один раз при выключении"""
-    global DEVICES, TUYA_CONFIG, GATE_IP
+    global DEVICES, HA_CONFIG, GATE_IP
     DEVICES = load_devices(INI_FILE)
-    TUYA_CONFIG = load_tuya_config(INI_FILE)
+    HA_CONFIG = load_ha_config(INI_FILE)
     GATE_IP = load_gate_ip(INI_FILE)
-    logging.info(f"Application startup: Loaded {len(DEVICES)} devices.")
+    logging.info(f"Application startup: Loaded {len(DEVICES)} devices with HA config.")
     yield
     await cleanup_bot()
     logging.info("Application shutdown.")
@@ -67,8 +204,8 @@ class Device:
 
     def to_dict(self):
         status_display = self.status_text
-        # Логика для карточки: всегда показываем простой статус Open/Closed
-        if self.name.lower() == 'biggate' and self.is_online and self.gate_state:
+        # Логика для карточки: всегда показываем простой статус Open/Closed для всех ворот
+        if self.name.lower() in ['biggate', 'smallgate'] and self.is_online and self.gate_state:
             status_display = self.gate_state
             
         return {
@@ -76,12 +213,14 @@ class Device:
             'is_online': self.is_online, 'status_text': status_display, 'gate_state': self.gate_state,
             'battery_level': self.battery_level, 'has_extended_params': bool(self.sec_after_open is not None),
             'special_monitoring_active': self.special_monitoring_active,
-            'monitoring_text': self.monitoring_text # Добавляем новое поле в ответ
+            'monitoring_text': self.monitoring_text, # Добавляем новое поле в ответ
+            'is_gate': self.name.lower() in ['biggate', 'smallgate'],  # Флаг для фронтенда
+            'gate_priority': 1 if self.name.lower() == 'biggate' else 2 if self.name.lower() == 'smallgate' else 999  # Для сортировки
         }
 
-    async def check_status(self, tuya_config):
+    async def check_status(self, ha_config):
         if self.device_type == 'SENSOR':
-            return await asyncio.to_thread(self._check_sensor_status, tuya_config)
+            return await asyncio.to_thread(self._check_sensor_status, ha_config)
         else:
             return await self._check_ping_status()
 
@@ -99,21 +238,50 @@ class Device:
         except asyncio.TimeoutError: logging.error(f"Async ping timeout for {self.name}"); return False
         except Exception as e: logging.error(f"Error async pinging {self.name}: {e}"); return False
 
-    def _check_sensor_status(self, tuya_config):
+    def _check_sensor_status(self, ha_config):
         try:
-            client = tinytuya.Cloud(apiRegion=tuya_config.get('API_REGION'), apiKey=tuya_config.get('ACCESS_ID'), apiSecret=tuya_config.get('ACCESS_KEY'))
-            device_data = client.getstatus(self.address)
-            if 'result' not in device_data: return False
             if self.name.lower() == 'biggate':
-                gate_result = check_gate(self.address)
-                if gate_result: self.gate_state, self.battery_level = ('Closed' if gate_result[0] else 'Open'), gate_result[1]
-                else: self.gate_state = "Error"
-            return True
-        except Exception as e: logging.error(f"Error checking sensor {self.name}: {e}"); return False
+                # Для biggate используем entity ID из HA конфигурации
+                gate_entity_id = ha_config.get('big_gate_opening_entity', '').strip('"')
+                if not gate_entity_id:
+                    logging.error(f"big_gate_opening_entity не настроен в конфигурации HA")
+                    return False
+                    
+                gate_result = check_gate(gate_entity_id)
+                if gate_result: 
+                    self.gate_state, self.battery_level = ('Closed' if gate_result[0] else 'Open'), gate_result[1]
+                    return True
+                else: 
+                    self.gate_state = "Error"
+                    return False
+            elif self.name.lower() == 'smallgate':
+                # Для smallgate используем entity ID из HA конфигурации
+                gate_entity_id = ha_config.get('small_gate_opening_entity', '').strip('"')
+                if not gate_entity_id:
+                    logging.error(f"small_gate_opening_entity не настроен в конфигурации HA")
+                    return False
+                    
+                gate_result = check_gate(gate_entity_id)
+                if gate_result: 
+                    self.gate_state, self.battery_level = ('Closed' if gate_result[0] else 'Open'), gate_result[1]
+                    return True
+                else: 
+                    self.gate_state = "Error"
+                    return False
+            else:
+                # Для других сенсоров можно добавить поддержку по аналогии
+                logging.warning(f"HA support for sensor {self.name} not implemented yet")
+                return False
+        except Exception as e: 
+            logging.error(f"Error checking HA sensor {self.name}: {e}")
+            return False
 
 # --- Функции Загрузки ---
 def load_devices(ini_file):
-    config = configparser.ConfigParser(); config.read(ini_file)
+    config = configparser.ConfigParser()
+    # Сохраняем оригинальный регистр ключей
+    config.optionxform = str
+    config.read(ini_file)
     devices_list = []
     if 'Computers' in config:
         for name, value in config['Computers'].items():
@@ -122,13 +290,36 @@ def load_devices(ini_file):
         for name, value in config['Sensors'].items():
             if name.lower() == 'ip_gate': continue
             parts = value.split()
-            if name.lower() == 'biggate' and len(parts) == 7: devices_list.append(Device(name, parts[0], parts[1], int(parts[2]), int(parts[3]), int(parts[4]), int(parts[5]), int(parts[6])))
-            elif len(parts) == 4: devices_list.append(Device(name, parts[0], parts[1], int(parts[2]), int(parts[3])))
+            # Для biggate и smallgate читаем entity ID из HA конфигурации, но сохраняем параметры тайминга
+            if name.lower() in ['biggate', 'smallgate'] and len(parts) >= 4:
+                # Используем dummy address, так как реальный entity ID будет из HA секции
+                if len(parts) == 7:
+                    devices_list.append(Device(name, "HA_ENTITY", parts[1], int(parts[2]), int(parts[3]), int(parts[4]), int(parts[5]), int(parts[6])))
+                else:
+                    devices_list.append(Device(name, "HA_ENTITY", parts[1], int(parts[2]), int(parts[3])))
+            elif len(parts) == 4: 
+                devices_list.append(Device(name, parts[0], parts[1], int(parts[2]), int(parts[3])))
     return devices_list
 
-def load_tuya_config(ini_file):
-    config = configparser.ConfigParser(); config.read(ini_file)
-    return config['tuya'] if 'tuya' in config else {}
+def load_ha_config(ini_file):
+    config = configparser.ConfigParser(); 
+    config.read(ini_file)
+    
+    # Отладочная информация без эмодзи
+    simple_print(f"Reading config file: {ini_file}")
+    simple_print(f"Available sections: {config.sections()}")
+    
+    if 'HA' in config:
+        ha_dict = dict(config['HA'])
+        simple_print(f"HA section options: {list(ha_dict.keys())}")
+        simple_print(f"HA_IP: {ha_dict.get('ha_ip', 'NOT FOUND')}")
+        simple_print(f"HA_TOKEN: {'***' if ha_dict.get('ha_token') else 'NOT FOUND'}")
+        simple_print(f"big_gate_opening_entity: {ha_dict.get('big_gate_opening_entity', 'NOT FOUND')}")
+        simple_print(f"small_gate_opening_entity: {ha_dict.get('small_gate_opening_entity', 'NOT FOUND')}")
+        return ha_dict
+    else:
+        simple_print("ERROR: Section [HA] not found in config file!")
+        return {}
 
 def load_gate_ip(ini_file):
     config = configparser.ConfigParser(); config.read(ini_file)
@@ -148,7 +339,7 @@ async def handle_biggate_after_toggle(biggate_device, initial_gate_state):
         
         for i in range(attempts):
             await asyncio.sleep(wait_seconds)
-            await asyncio.to_thread(biggate_device._check_sensor_status, TUYA_CONFIG)
+            await asyncio.to_thread(biggate_device._check_sensor_status, HA_CONFIG)
             
             if biggate_device.gate_state == target_state:
                 logging.info(f"BigGate reached target state '{target_state}'.")
@@ -173,6 +364,12 @@ async def handle_biggate_after_toggle(biggate_device, initial_gate_state):
                 logging.info(f"Sending Telegram alert: {message}")
                 try:
                     await send_message_with_buttons(text=message, button_names=[], time_out=0)
+                    # Останавливаем бота после уведомления
+                    try:
+                        await cleanup_bot()
+                        logging.info("Telegram bot stopped after gate alert.")
+                    except Exception as e:
+                        logging.warning(f"Error stopping bot after alert: {e}")
                 except Exception as telegram_error:
                     logging.error(f"Failed to send Telegram message: {telegram_error}")
             
@@ -181,16 +378,16 @@ async def handle_biggate_after_toggle(biggate_device, initial_gate_state):
     finally:
         biggate_device.special_monitoring_active = False
         biggate_device.monitoring_text = "" # Очищаем детальный статус
-        await asyncio.to_thread(biggate_device._check_sensor_status, TUYA_CONFIG)
+        await asyncio.to_thread(biggate_device._check_sensor_status, HA_CONFIG)
         pending_updates[biggate_device.name] = biggate_device.to_dict()
         logging.info(f"Special monitoring for {biggate_device.name} finished.")
 
 async def check_and_prepare_device(device):
     try:
-        device.is_online = await device.check_status(TUYA_CONFIG)
+        device.is_online = await device.check_status(HA_CONFIG)
         # Устанавливаем простой статус для карточки
         if device.is_online: 
-            if device.name.lower() == 'biggate' and device.gate_state:
+            if device.name.lower() in ['biggate', 'smallgate'] and device.gate_state:
                 device.status_text = device.gate_state
             else:
                  device.status_text = "Online"
@@ -211,14 +408,39 @@ async def status_stream(request: Request):
         while True:
             if await request.is_disconnected(): break
             
+            # Отправляем pending updates (с приоритетом для ворот)
             if pending_updates:
-                for name, data in list(pending_updates.items()): yield {"event": "device_status", "data": json.dumps(data)}
+                # Сначала отправляем ворота (с сортировкой)
+                gate_updates = {}
+                other_updates = {}
+                
+                for name, data in pending_updates.items():
+                    if data.get('is_gate'):
+                        gate_updates[name] = data
+                    else:
+                        other_updates[name] = data
+                
+                # Сортируем ворота по приоритету
+                sorted_gates = sorted(gate_updates.items(), key=lambda x: x[1].get('gate_priority', 999))
+                
+                # Отправляем в порядке: сначала ворота, потом остальные
+                for name, data in sorted_gates:
+                    yield {"event": "device_status", "data": json.dumps(data)}
+                
+                for name, data in other_updates.items():
+                    yield {"event": "device_status", "data": json.dumps(data)}
+                    
                 pending_updates.clear()
 
+            # ИЗМЕНЕНО: Отправляем данные по мере получения, а не ждем все устройства
             tasks = [check_and_prepare_device(device) for device in DEVICES if not device.special_monitoring_active]
+            
+            # Обрабатываем результаты по мере их поступления
             for task in asyncio.as_completed(tasks):
                 device_data = await task
-                if device_data: yield {"event": "device_status", "data": json.dumps(device_data)}
+                if device_data: 
+                    # Отправляем данные немедленно, как только получили
+                    yield {"event": "device_status", "data": json.dumps(device_data)}
 
             await asyncio.sleep(5)
     return EventSourceResponse(event_generator())
@@ -230,7 +452,13 @@ async def toggle_gate():
     if not GATE_IP: raise HTTPException(404, "Gate IP not configured")
     if time.time() - last_gate_toggle < 2: raise HTTPException(429, "Please wait")
     
-    biggate_device = next((d for d in DEVICES if d.name.lower() == 'biggate'), None)
+    # Ищем BigGate устройство (учитываем что имя может быть в разных регистрах)
+    biggate_device = None
+    for d in DEVICES:
+        if d.name.lower() == 'biggate':
+            biggate_device = d
+            break
+    
     if not biggate_device: raise HTTPException(404, "BigGate device not found")
     if biggate_device.special_monitoring_active: raise HTTPException(409, "Gate is already in a toggling process.")
 
@@ -242,7 +470,7 @@ async def toggle_gate():
         biggate_device.monitoring_text = "Обработка..."
         pending_updates[biggate_device.name] = biggate_device.to_dict()
 
-        await asyncio.to_thread(biggate_device._check_sensor_status, TUYA_CONFIG)
+        await asyncio.to_thread(biggate_device._check_sensor_status, HA_CONFIG)
         initial_state = biggate_device.gate_state
         
         success = await asyncio.to_thread(control_shelly_switch, GATE_IP)
@@ -263,4 +491,38 @@ async def toggle_gate():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    
+    # Настройка uvicorn без цветов в логах
+    uvicorn_config = uvicorn.Config(
+        app, 
+        host="0.0.0.0", 
+        port=8000,
+        log_config={
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "default": {
+                    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                },
+            },
+            "handlers": {
+                "default": {
+                    "formatter": "default",
+                    "class": "logging.StreamHandler",
+                    "stream": "ext://sys.stdout",
+                },
+            },
+            "root": {
+                "level": "INFO",
+                "handlers": ["default"],
+            },
+            "loggers": {
+                "uvicorn": {"handlers": ["default"], "level": "INFO", "propagate": False},
+                "uvicorn.error": {"handlers": ["default"], "level": "INFO", "propagate": False},
+                "uvicorn.access": {"handlers": ["default"], "level": "INFO", "propagate": False},
+            },
+        }
+    )
+    
+    server = uvicorn.Server(uvicorn_config)
+    server.run()

@@ -106,6 +106,7 @@
                 
                 const batteryInfo = device.battery_level ? `<div class="device-info"><span>Battery:</span> <span>${device.battery_level}%</span></div>` : '';
                 
+                // 1. Обновляем КАРТОЧКУ УСТРОЙСТВА. Она использует `device.status_text` (простой статус: Open/Closed)
                 card.innerHTML = `
                     <div class="device-name">${device.name}</div>
                     <div class="device-info"><span>Address:</span> <span>${device.address}</span></div>
@@ -113,47 +114,47 @@
                     <div class="device-info"><span>Status:</span> <span class="status-badge ${getStatusClass(device.status_text)}">${device.status_text}</span></div>
                 `;
 
-                // --- ИСПРАВЛЕННАЯ ЛОГИКА ОБНОВЛЕНИЯ КНОПКИ ---
-                if (device.name.toLowerCase() === 'biggate' && gateButton) {
-                    if (device.special_monitoring_active) {
-                        gateButton.disabled = true;
-                        // Просто отображаем статус с бэкенда, каким бы он ни был
-                        gateButton.textContent = device.status_text;
+                // 2. Обновляем ЭЛЕМЕНТЫ УПРАВЛЕНИЯ (кнопку и строку под ней)
+                if (device.name.toLowerCase() === 'biggate') {
+                    const messageDiv = document.getElementById('message');
+                    
+                    // Обновляем СТРОКУ ПОД КНОПКОЙ. Она использует `device.monitoring_text` (детальный статус)
+                    if (device.monitoring_text) {
+                        messageDiv.innerHTML = `<div class="message success">${device.monitoring_text}</div>`;
                     } else {
-                        gateButton.disabled = false;
-                        gateButton.textContent = 'Open/Close Gate';
+                        // Очищаем, если мониторинг неактивен, но не трогаем, если там сообщение об ошибке
+                        if (!messageDiv.querySelector('.error')) {
+                             messageDiv.innerHTML = '';
+                        }
+                    }
+
+                    // Обновляем КНОПКУ. Текст не меняем, только состояние disabled
+                    if (gateButton) {
+                        gateButton.disabled = device.special_monitoring_active;
                     }
                 }
             }
 
             window.toggleGate = async function() {
-                const messageDiv = document.getElementById('message');
-                gateButton.disabled = true;
-                gateButton.textContent = 'Sending...';
-                messageDiv.innerHTML = '';
-
+                // Эта функция теперь только отправляет запрос. Обновления придут по SSE.
                 try {
                     const response = await fetch('/toggle-gate', { method: 'POST' });
-                    const result = await response.json();
-                    
                     if (!response.ok) {
+                        const result = await response.json();
                         showMessage(result.detail || 'Gate control failed', 'error');
-                        gateButton.disabled = false;
-                        gateButton.textContent = 'Open/Close Gate';
-                    } else {
-                         showMessage(result.message, 'success');
                     }
                 } catch (error) {
                     showMessage('Network error: ' + error.message, 'error');
-                    gateButton.disabled = false;
-                    gateButton.textContent = 'Open/Close Gate';
                 }
             };
 
             function showMessage(text, type) {
                 const messageDiv = document.getElementById('message');
                 messageDiv.innerHTML = `<div class="message ${type}">${text}</div>`;
-                setTimeout(() => { messageDiv.innerHTML = ''; }, 5000);
+                // Ошибки не будут стираться автоматически, чтобы их можно было прочитать
+                if(type !== 'error') {
+                    setTimeout(() => { messageDiv.innerHTML = ''; }, 5000);
+                }
             }
 
             connect();

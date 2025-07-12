@@ -1,6 +1,7 @@
 [Telegram ID]
-TOKEN = "8163246799:AAGovrIUQh6N9ckRA0kjiDEQ2x2IUUEZqyA"
-chat_id = "247210926"
+#CheckGate channel
+TOKEN = <Your Telegram token>
+chat_id = "<Your Telegram Chat ID>"
 
 [Computers]
 Server = 192.168.2.136 RPI 30 10
@@ -18,10 +19,11 @@ SmallGate =  DUMMY SENSOR 180 120
 ip_gate = 192.168.2.141
 
 [HA]
-HA_IP = "192.168.2.43"
-HA_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjOTQ3MzA0NjYwMzg0MjU4OTAxMzE4N2M4ODM0MzE0NyIsImlhdCI6MTc1MjIxMzM4NSwiZXhwIjoyMDY3NTczMzg1fQ.vD7kr9mS20gFpnSEUGBXNG5LeYzNO__dT79eTOKexdY"
-big_gate_opening_entity = "binary_sensor.lumi_lumi_sensor_magnet_aq2_opening_2"
-small_gate_opening_entity = "binary_sensor.lumi_lumi_sensor_magnet_aq2_opening"
+HA_IP = "<IP of your Home Assistant>"
+HA_TOKEN = "<Your Home Assistant token>"
+small_gate_opening_entity = "<Small gate door sensor entity>"
+big_gate_opening_entity = "<Big gate door sensor entity>"
+
 
 [Time-outs]
 delay_1 = 0
